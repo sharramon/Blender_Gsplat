@@ -1,0 +1,15 @@
+ns-process-data images --data images --output-dir colmap_data
+del /q colmap_data\db_on.db
+rmdir /s /q colmap_data\sparse_on
+mkdir colmap_data\sparse_on
+
+colmap feature_extractor --database_path colmap_data\db_on.db --image_path colmap_data\images --ImageReader.single_camera 1 --ImageReader.camera_model OPENCV
+colmap exhaustive_matcher --database_path colmap_data\db_on.db
+colmap mapper --database_path colmap_data\db_on.db --image_path colmap_data\images --output_path colmap_data\sparse_on
+
+
+ns-process-data images --data images --output-dir colmap_data --skip-colmap --skip-image-processing --colmap-model-path sparse_on/0
+
+ns-train splatfacto --data colmap_data
+
+ns-export gaussian-splat --load-config outputs\splatfacto\*\config.yml --output-dir splat_export
