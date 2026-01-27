@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Nerfstudio Object-Only Splat Exporter (Spherical) [Images Only + Pipeline Scripts]",
     "author": "ChatGPT",
-    "version": (1, 8, 1),
+    "version": (1, 8, 2),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > Nerfstudio",
     "description": "Create spherical camera rig(s) with optional radius layers and render RGBA PNGs to an images/ folder. Optionally write external COLMAP+Nerfstudio pipeline scripts.",
@@ -188,6 +188,7 @@ class NSOT_Props(bpy.types.PropertyGroup):
     progress_current: bpy.props.IntProperty(name="Progress Current", default=0, min=0)
     progress_total: bpy.props.IntProperty(name="Progress Total", default=0, min=0)
 
+    # These are still shown in the UI for now (not wired into the new BATs directly)
     conda_bat: bpy.props.StringProperty(
         name="CONDA_BAT Path",
         subtype="FILE_PATH",
@@ -204,7 +205,7 @@ class NSOT_Props(bpy.types.PropertyGroup):
     open_viewer: bpy.props.BoolProperty(
         name="Open Viewer (localhost:7007)",
         default=True,
-        description="If enabled, run_pipeline.bat will open the Nerfstudio viewer in your browser before training.",
+        description="(Legacy) Viewer toggle; current run_pipeline.bat uses default ns-train viewer.",
     )
 
 
@@ -339,7 +340,7 @@ class NSOT_OT_export_dataset(bpy.types.Operator):
 
 class NSOT_OT_write_pipeline_bat(bpy.types.Operator):
     bl_idname = "nsot.write_pipeline_bat"
-    bl_label = "Write Pipeline BAT (COLMAP + Train + Export)"
+    bl_label = "Write Pipeline BAT (COLMAP + Train)"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -353,118 +354,237 @@ class NSOT_OT_write_pipeline_bat(bpy.types.Operator):
 
         bat_path = os.path.join(out_root, "run_pipeline.bat")
 
-        viewer_line = 'start "" http://localhost:7007' if p.open_viewer else None
+        bat = r"""@echo off
+setlocal EnableExtensions EnableDelayedExpansion
 
-        bat_lines = [
-            "@echo off",
-            "setlocal enabledelayedexpansion",
-            "",
-            "title GSplat COLMAP + Nerfstudio Pipeline",
-            r'cd /d "%~dp0"',
-            "",
-            f'set "CONDA_BAT={p.conda_bat}"',
-            f'set "CONDA_ENV={p.conda_env}"',
-            "",
-            "echo === Activating conda env: %CONDA_ENV% ===",
-            r'if not exist "%CONDA_BAT%" (',
-            "  echo ERROR: conda.bat not found: %CONDA_BAT%",
-            "  goto :fail",
-            ")",
-            r'call "%CONDA_BAT%" activate "%CONDA_ENV%"',
-            "if errorlevel 1 (",
-            "  echo ERROR: Failed to activate conda env: %CONDA_ENV%",
-            "  goto :fail",
-            ")",
-            "",
-            "echo === Verifying tools on PATH ===",
-            "where colmap || (echo ERROR: colmap not found on PATH && goto :fail)",
-            "where ns-process-data || (echo ERROR: ns-process-data not found on PATH && goto :fail)",
-            "where ns-train || (echo ERROR: ns-train not found on PATH && goto :fail)",
-            "where ns-export || (echo ERROR: ns-export not found on PATH && goto :fail)",
-            "",
-            "echo === Resetting colmap_data ===",
-            "if exist colmap_data rmdir /s /q colmap_data",
-            "mkdir colmap_data || goto :fail",
-            r"mkdir colmap_data\images || goto :fail",
-            r"mkdir colmap_data\sparse_on || goto :fail",
-            "",
-            "echo === Copying images -> colmap_data\\images ===",
-            r'if not exist "images" (',
-            r"  echo ERROR: images folder not found at %CD%\images",
-            r"  goto :fail",
-            r")",
-            r"xcopy /e /i /y images colmap_data\images",
-            "if errorlevel 1 (",
-            "  echo ERROR: xcopy failed.",
-            "  goto :fail",
-            ")",
-            "",
-            "echo === COLMAP: feature_extractor ===",
-            r"colmap feature_extractor --database_path colmap_data\db_on.db --image_path colmap_data\images --ImageReader.single_camera 1 --ImageReader.camera_model OPENCV --ImageReader.default_focal_length_factor 1.2",
-            "if errorlevel 1 goto :fail",
-            "",
-            "echo === COLMAP: exhaustive_matcher ===",
-            r"colmap exhaustive_matcher --database_path colmap_data\db_on.db",
-            "if errorlevel 1 goto :fail",
-            "",
-            "echo === COLMAP: mapper ===",
-            r"colmap mapper --database_path colmap_data\db_on.db --image_path colmap_data\images --output_path colmap_data\sparse_on",
-            "if errorlevel 1 goto :fail",
-            "",
-            "echo === Nerfstudio: ns-process-data (use existing COLMAP) ===",
-            r"ns-process-data images --data colmap_data\images --output-dir colmap_data --skip-colmap --skip-image-processing --colmap-model-path colmap_data\sparse_on\0",
-            "if errorlevel 1 goto :fail",
-            "",
-        ]
+rem ROOT = folder containing this .bat
+set "ROOT=%~dp0."
+set "OUTROOT=%ROOT%\outputs"
+set "DATASET_NAME=colmap_data"
+set "METHOD=splatfacto"
 
-        if viewer_line:
-            bat_lines.append(viewer_line)
+echo [0] starting gsplat_pipeline.bat
+cd /d "%ROOT%"
 
-        bat_lines += [
-            "echo === Nerfstudio: ns-train splatfacto ===",
-            r"ns-train splatfacto --data colmap_data",
-            "if errorlevel 1 goto :fail",
-            "",
-            "echo === Finding latest config.yml ===",
-            r'set "ROOT=outputs\colmap_data\splatfacto"',
-            r'if not exist "%ROOT%" (',
-            r"  echo ERROR: training outputs not found at %ROOT%",
-            r"  goto :fail",
-            r")",
-            r'for /f "delims=" %%i in (''dir /b /ad /o-d "%ROOT%"'') do (',
-            r'  set "RUN=%%i"',
-            r"  goto :FOUND",
-            r")",
-            r":FOUND",
-            r'set "CFG=%ROOT%\%RUN%\config.yml"',
-            r'if not exist "%CFG%" (',
-            r"  echo ERROR: Could not find config: %CFG%",
-            r"  goto :fail",
-            r")",
-            "",
-            "echo === Exporting gaussian splat ===",
-            r'ns-export gaussian-splat --load-config "%CFG%" --output-dir splat_export',
-            "if errorlevel 1 goto :fail",
-            "",
-            r"echo DONE. Export at: %CD%\splat_export",
-            "pause",
-            "exit /b 0",
-            "",
-            r":fail",
-            "echo.",
-            "echo FAILED. See errors above.",
-            "pause",
-            "exit /b 1",
-            "",
-            "endlocal",
-        ]
+rem --- wipe + recreate colmap_data ---
+if exist "%DATASET_NAME%" rmdir /s /q "%DATASET_NAME%"
+mkdir "%DATASET_NAME%"
+mkdir "%DATASET_NAME%\images"
+
+echo [0.1] copying images...
+xcopy /e /i /y "images" "%DATASET_NAME%\images" >nul
+if errorlevel 1 goto FAIL
+
+rem --- COLMAP (assumes colmap is on PATH) ---
+echo [1] running extractor...
+call colmap feature_extractor --database_path "%DATASET_NAME%\db_on.db" --image_path "%DATASET_NAME%\images" --ImageReader.single_camera 1 --ImageReader.camera_model OPENCV
+echo [1.1] extractor done, errorlevel=%errorlevel%
+if errorlevel 1 goto FAIL
+
+echo [2] running matcher...
+call colmap exhaustive_matcher --database_path "%DATASET_NAME%\db_on.db"
+echo [2.1] matcher done, errorlevel=%errorlevel%
+if errorlevel 1 goto FAIL
+
+echo [3] running mapper...
+if not exist "%DATASET_NAME%\sparse_on" mkdir "%DATASET_NAME%\sparse_on"
+call colmap mapper --database_path "%DATASET_NAME%\db_on.db" --image_path "%DATASET_NAME%\images" --output_path "%DATASET_NAME%\sparse_on"
+echo [3.1] mapper done, errorlevel=%errorlevel%
+if errorlevel 1 goto FAIL
+
+rem --- Conda activate nerfstudio env ---
+echo [4] activating conda env: nerfstudio
+call "%USERPROFILE%\miniconda3\Scripts\activate.bat"
+if errorlevel 1 goto FAIL
+
+call conda activate nerfstudio
+if errorlevel 1 goto FAIL
+
+echo [4.1] sanity check nerfstudio commands...
+where ns-process-data >nul
+if errorlevel 1 goto FAIL
+where ns-train >nul
+if errorlevel 1 goto FAIL
+where ns-export >nul
+if errorlevel 1 goto FAIL
+
+rem --- Nerfstudio ---
+echo [5] nerfstudio process-data...
+ns-process-data images --data "%DATASET_NAME%" --output-dir "%DATASET_NAME%" --skip-colmap --skip-image-processing --colmap-model-path "sparse_on/0"
+echo [5.1] ns-process-data done, errorlevel=%errorlevel%
+if errorlevel 1 goto FAIL
+
+echo [6] nerfstudio train (5000 iters)...
+rem Use tensorboard to avoid viewer and wandb prompts
+ns-train %METHOD% --data "%DATASET_NAME%" --max-num-iterations 5000 --vis tensorboard
+set "TRAIN_ERR=%errorlevel%"
+
+echo [6.1] ns-train done, errorlevel=%TRAIN_ERR%
+if not "%TRAIN_ERR%"=="0" goto FAIL
+
+rem --- locate latest run ---
+echo [7] locating latest run under: "%OUTROOT%\%DATASET_NAME%\%METHOD%"
+
+set "RUN_DIR="
+for /f "delims=" %%D in ('dir "%OUTROOT%\%DATASET_NAME%\%METHOD%" /b /ad /o-d 2^>nul') do (
+  set "RUN_DIR=%OUTROOT%\%DATASET_NAME%\%METHOD%\%%D"
+  goto GOT_RUN
+)
+
+:GOT_RUN
+if "%RUN_DIR%"=="" (
+  echo [X] Could not find any run folder under "%OUTROOT%\%DATASET_NAME%\%METHOD%"
+  pause
+  exit /b 1
+)
+
+set "CFG=%RUN_DIR%\config.yml"
+echo [7.1] latest run: %RUN_DIR%
+
+if not exist "%CFG%" (
+  echo [X] Missing config: %CFG%
+  pause
+  exit /b 1
+)
+
+echo [8] exporting gaussian splat...
+if not exist "%RUN_DIR%\export" mkdir "%RUN_DIR%\export"
+
+ns-export gaussian-splat --load-config "%CFG%" --output-dir "%RUN_DIR%\export"
+echo [8.1] ns-export done, errorlevel=%errorlevel%
+if errorlevel 1 goto FAIL
+
+echo [9] copying exported .ply to project root as FINAL_GSPLAT.ply
+if exist "%ROOT%\FINAL_GSPLAT.ply" del /q "%ROOT%\FINAL_GSPLAT.ply"
+
+set "EXPORTED_PLY="
+for /f "delims=" %%F in ('dir "%RUN_DIR%\export" /b /s "*.ply" 2^>nul') do (
+  set "EXPORTED_PLY=%%F"
+  goto GOT_PLY
+)
+
+:GOT_PLY
+if "%EXPORTED_PLY%"=="" (
+  echo [X] No .ply found under "%RUN_DIR%\export"
+  pause
+  exit /b 1
+)
+
+copy /y "%EXPORTED_PLY%" "%ROOT%\FINAL_GSPLAT.ply" >nul
+if errorlevel 1 goto FAIL
+
+echo [OK] ALL DONE
+echo     Run dir: %RUN_DIR%
+echo     Exported: %EXPORTED_PLY%
+echo     Final: %ROOT%\FINAL_GSPLAT.ply
+pause
+exit /b 0
+
+:FAIL
+echo [X] FAILED, errorlevel=%errorlevel%
+pause
+exit /b %errorlevel%
+"""
 
         with open(bat_path, "w", newline="\r\n", encoding="utf-8") as f:
-            f.write("\r\n".join(bat_lines))
+            f.write(bat)
 
         self.report({"INFO"}, f"Wrote pipeline BAT: {bat_path}")
         return {"FINISHED"}
+    
+class NSOT_OT_write_export_bat(bpy.types.Operator):
+    bl_idname = "nsot.write_export_bat"
+    bl_label = "Write Export BAT (Export Latest)"
+    bl_options = {"REGISTER"}
 
+    def execute(self, context):
+        p = context.scene.nsot_props
+        if not p.output_dir:
+            self.report({"ERROR"}, "Output Directory is empty.")
+            return {"CANCELLED"}
+
+        out_root = bpy.path.abspath(p.output_dir)
+        ensure_dir(out_root)
+
+        bat_path = os.path.join(out_root, "export_latest.bat")
+
+        bat = r"""@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+
+rem ROOT = folder containing this .bat
+set "ROOT=%~dp0."
+set "OUTROOT=%ROOT%\outputs"
+set "DATASET_NAME=colmap_data"
+set "METHOD=splatfacto"
+
+echo [7] locating latest run under: "%OUTROOT%\%DATASET_NAME%\%METHOD%"
+
+set "RUN_DIR="
+for /f "delims=" %%D in ('dir "%OUTROOT%\%DATASET_NAME%\%METHOD%" /b /ad /o-d 2^>nul') do (
+  set "RUN_DIR=%OUTROOT%\%DATASET_NAME%\%METHOD%\%%D"
+  goto GOT_RUN
+)
+
+:GOT_RUN
+if "%RUN_DIR%"=="" (
+  echo [X] Could not find any run folder under "%OUTROOT%\%DATASET_NAME%\%METHOD%"
+  pause
+  exit /b 1
+)
+
+set "CFG=%RUN_DIR%\config.yml"
+echo [7.1] latest run: %RUN_DIR%
+
+if not exist "%CFG%" (
+  echo [X] Missing config: %CFG%
+  pause
+  exit /b 1
+)
+
+echo [8] exporting gaussian splat...
+if not exist "%RUN_DIR%\export" mkdir "%RUN_DIR%\export"
+
+ns-export gaussian-splat --load-config "%CFG%" --output-dir "%RUN_DIR%\export"
+echo [8.1] ns-export done, errorlevel=%errorlevel%
+if errorlevel 1 goto FAIL
+
+echo [9] copying exported .ply to project root as FINAL_GSPLAT.ply
+if exist "%ROOT%\FINAL_GSPLAT.ply" del /q "%ROOT%\FINAL_GSPLAT.ply"
+
+set "EXPORTED_PLY="
+for /f "delims=" %%F in ('dir "%RUN_DIR%\export" /b /s "*.ply" 2^>nul') do (
+  set "EXPORTED_PLY=%%F"
+  goto GOT_PLY
+)
+
+:GOT_PLY
+if "%EXPORTED_PLY%"=="" (
+  echo [X] No .ply found under "%RUN_DIR%\export"
+  pause
+  exit /b 1
+)
+
+copy /y "%EXPORTED_PLY%" "%ROOT%\FINAL_GSPLAT.ply" >nul
+if errorlevel 1 goto FAIL
+
+echo [OK] EXPORT DONE
+echo     Run dir: %RUN_DIR%
+echo     Exported: %EXPORTED_PLY%
+echo     Final: %ROOT%\FINAL_GSPLAT.ply
+pause
+exit /b 0
+
+:FAIL
+echo [X] FAILED, errorlevel=%errorlevel%
+pause
+exit /b %errorlevel%
+"""
+
+        with open(bat_path, "w", newline="\r\n", encoding="utf-8") as f:
+            f.write(bat)
+
+        self.report({"INFO"}, f"Wrote export BAT: {bat_path}")
+        return {"FINISHED"}
 
 class NSOT_OT_export_splat_package(bpy.types.Operator):
     bl_idname = "nsot.export_splat_package"
@@ -713,6 +833,7 @@ class NSOT_PT_panel(bpy.types.Panel):
         layout.prop(p, "conda_env")
         layout.prop(p, "open_viewer")
         layout.operator(NSOT_OT_write_pipeline_bat.bl_idname, icon="FILE_SCRIPT")
+        layout.operator(NSOT_OT_write_export_bat.bl_idname, icon="EXPORT")
         layout.operator(NSOT_OT_export_splat_package.bl_idname, icon="TEXT")
 
 
@@ -721,6 +842,7 @@ classes = (
     NSOT_OT_create_cameras,
     NSOT_OT_export_dataset,
     NSOT_OT_write_pipeline_bat,
+    NSOT_OT_write_export_bat,
     NSOT_OT_export_splat_package,
     NSOT_PT_panel,
 )
