@@ -11,6 +11,7 @@ bl_info = {
 import bpy
 import os
 import math
+import subprocess
 from mathutils import Vector, Matrix
 
 
@@ -415,10 +416,41 @@ echo [5.1] ns-process-data done, errorlevel=%errorlevel%
 if errorlevel 1 goto FAIL
 
 echo [6] nerfstudio train (5000 iters)...
-rem Use tensorboard to avoid viewer and wandb prompts
+
+rem Toggle viewer/websocket:
+rem OPEN_VIEWER=1 -> open websocket + open browser
+rem OPEN_VIEWER=0 -> no websocket
+set "OPEN_VIEWER=1"
+rem set "OPEN_VIEWER=0"
+
+echo     OPEN_VIEWER=%OPEN_VIEWER%
+
+if /I "%OPEN_VIEWER%"=="1" goto TRAIN_VIEWER
+goto TRAIN_HEADLESS
+
+:TRAIN_VIEWER
+echo     viewer ON (websocket). Training starts now. Browser will open when ready...
+
+rem Kick off a background watcher that opens the browser once port 7007 is listening.
+start "" /b powershell -NoProfile -Command ^
+  "$deadline=(Get-Date).AddSeconds(120); " ^
+  "while((Get-Date) -lt $deadline) { " ^
+  "  try { $c=New-Object Net.Sockets.TcpClient('127.0.0.1',7007); $c.Close(); Start-Process 'http://127.0.0.1:7007'; break } " ^
+  "  catch { Start-Sleep -Milliseconds 250 } " ^
+  "}"
+
+rem Run training in the foreground (so the bat waits here, as desired)
+ns-train %METHOD% --data "%DATASET_NAME%" --max-num-iterations 5000 --vis viewer
+set "TRAIN_ERR=%errorlevel%"
+goto TRAIN_DONE
+
+:TRAIN_HEADLESS
+echo     viewer OFF (no websocket)
 ns-train %METHOD% --data "%DATASET_NAME%" --max-num-iterations 5000 --vis tensorboard
 set "TRAIN_ERR=%errorlevel%"
+goto TRAIN_DONE
 
+:TRAIN_DONE
 echo [6.1] ns-train done, errorlevel=%TRAIN_ERR%
 if not "%TRAIN_ERR%"=="0" goto FAIL
 
@@ -485,10 +517,13 @@ echo [X] FAILED, errorlevel=%errorlevel%
 pause
 exit /b %errorlevel%
 """
-
+        bat = bat.replace("{OPEN_VIEWER}", "1" if p.open_viewer else "0")
+        
         with open(bat_path, "w", newline="\r\n", encoding="utf-8") as f:
             f.write(bat)
-
+            
+        subprocess.Popen(["cmd", "/c", "start", "", bat_path], cwd=out_root)
+            
         self.report({"INFO"}, f"Wrote pipeline BAT: {bat_path}")
         return {"FINISHED"}
     
